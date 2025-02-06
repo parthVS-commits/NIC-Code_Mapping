@@ -1,5 +1,5 @@
 openai==0.28
-pinecone
+pinecone-client
 streamlit
 python-dotenv
 
