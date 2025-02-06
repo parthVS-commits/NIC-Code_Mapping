@@ -5,9 +5,9 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-openai.api_key = os.environ["OPENAI_API_KEY"]
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 # Initialize Pinecone
-pc = pinecone.Pinecone(os.environ["PINECONE_API_KEY"])
+pc = pinecone.Pinecone(st.secrets["PINECONE_API_KEY"])
 index = pc.Index("nic-classification")
 
 # Function to search for the closest NIC code based on user objective
