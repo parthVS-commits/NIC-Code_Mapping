@@ -1,22 +1,19 @@
-import streamlit as st
 import openai
 import pinecone
-from openai import OpenAI
+import streamlit as st
+import os
+from dotenv import load_dotenv
 
-# Initialize OpenAI client with secret
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+load_dotenv()
+openai.api_key = os.environ["OPENAI_API_KEY"]
+# Initialize Pinecone
+pc = pinecone.Pinecone(os.environ["PINECONE_API_KEY"])
+index = pc.Index("nic-classification")
 
-# Modify embedding function
+# Function to search for the closest NIC code based on user objective
 def search_nic_code(objective):
-    response = client.embeddings.create(
-        input=objective, 
-        model="text-embedding-ada-002"
-    )
-    query_embedding = response.data[0].embedding
-    
-    # Rest of your existing code remains the same
-    pc = pinecone.Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
-    index = pc.Index("nic-classification")
+    response = openai.Embedding.create(input=objective, model="text-embedding-ada-002")
+    query_embedding = response["data"][0]["embedding"]
     results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
     return [(match["id"], match["metadata"]["description"]) for match in results["matches"]]
 
