@@ -1,4 +1,5 @@
 openai
 pinecone
 streamlit
-dotenv
+python-dotenv
+
