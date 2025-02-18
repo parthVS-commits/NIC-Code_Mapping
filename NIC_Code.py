@@ -44,7 +44,7 @@ class NICFinder:
             return await loop.run_in_executor(
                 pool, self._pinecone_task,
                 embedding["data"][0]["embedding"],
-                10,  # top_k
+                3,  # top_k
                 True,  # include_metadata
                 None,  # filter
                 False  # include_values
