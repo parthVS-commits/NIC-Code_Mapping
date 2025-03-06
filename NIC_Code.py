@@ -1,6 +1,5 @@
-
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import openai
 import pinecone
 import streamlit as st
@@ -8,6 +7,8 @@ import os
 from dotenv import load_dotenv
 import time
 from functools import lru_cache
+import re
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -44,11 +45,65 @@ class NICFinder:
             return await loop.run_in_executor(
                 pool, self._pinecone_task,
                 embedding["data"][0]["embedding"],
-                5,  # top_k
+                20,  # reduced from 30 to 20 for faster results
                 True,  # include_metadata
                 None,  # filter
                 False  # include_values
             )
+            
+    async def rapid_rerank(self, objective, results, refined_objective):
+        """Quickly re-rank search results based on keyword matching and context"""
+        matches = results["matches"]
+        objective_terms = set(self._extract_keywords(objective.lower() + " " + refined_objective.lower()))
+        
+        if not objective_terms:  # Fallback if no significant terms extracted
+            return [(match["id"], match["metadata"]["description"]) for match in matches[:5]]
+        
+        # Prepare data for re-ranking
+        rerank_data = []
+        
+        # Get embeddings for objective and refined objective in batch
+        objective_combined = objective + " " + refined_objective
+        embedding_response = await self.fetch_embedding(objective_combined)
+        objective_embedding = embedding_response["data"][0]["embedding"]
+        
+        # Process all results at once
+        for match in matches:
+            description = match["metadata"]["description"]
+            description_terms = set(self._extract_keywords(description.lower()))
+            
+            # Calculate simple term overlap (keyword matching)
+            common_terms = objective_terms.intersection(description_terms)
+            term_score = len(common_terms) / max(1, len(objective_terms))
+            
+            # Use vector score as a strong signal
+            vector_score = match["score"]  # Original similarity score (0-1)
+            
+            # Simple weighted score - no GPT calls (much faster)
+            # Give slightly more weight to vector score for efficiency
+            combined_score = (term_score * 0.4) + (vector_score * 0.6)
+            
+            rerank_data.append({
+                "id": match["id"],
+                "description": description,
+                "original_score": vector_score,
+                "term_score": term_score,
+                "combined_score": combined_score
+            })
+        
+        # Sort by combined score
+        reranked_results = sorted(rerank_data, key=lambda x: x["combined_score"], reverse=True)
+        
+        # Return top 10 results
+        top_results = reranked_results[:5]
+        return [(item["id"], item["description"]) for item in top_results]
+    
+    def _extract_keywords(self, text):
+        """Extract meaningful keywords from text"""
+        # Remove common stop words
+        stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'if', 'of', 'in', 'on', 'for', 'to', 'with', 'by'}
+        words = re.findall(r'\b\w+\b', text)
+        return [word for word in words if word not in stop_words and len(word) > 2]
 
     async def parallel_search(self, objective):
         """Main search function with caching and parallel processing"""
@@ -64,16 +119,14 @@ class NICFinder:
         
         # Step 1 & 2: Get refined objective and generate embedding in parallel
         loop = asyncio.get_running_loop()
-        tasks = []
         
         # GPT task with faster model
         prompt = f"Refine the following business objective for better classification:\n\n{objective}"
-        with ProcessPoolExecutor(max_workers=1) as process_pool:
+        with ThreadPoolExecutor(max_workers=1) as thread_pool:
             gpt_task = loop.run_in_executor(
-                process_pool, self._gpt_task,
+                thread_pool, self._gpt_task,
                 prompt
             )
-            tasks.append(gpt_task)
         
         # Embedding task (start early)
         with ThreadPoolExecutor(max_workers=1) as thread_pool:
@@ -85,24 +138,23 @@ class NICFinder:
                     batch_size=16
                 )
             )
-            tasks.append(embedding_task)
         
         # Wait for both tasks to complete
-        refined_objective = await gpt_task
-        embedding_response = await embedding_task
+        refined_objective, embedding_response = await asyncio.gather(gpt_task, embedding_task)
         
         # Step 3: Search Pinecone
-        results = await self.search_pinecone(embedding_response)
+        raw_results = await self.search_pinecone(embedding_response)
+        
+        # Step 4: Fast contextual re-ranking (no additional API calls)
+        reranked_results = await self.rapid_rerank(objective, raw_results, refined_objective)
         
         # Cache results
-        matches = [(match["id"], match["metadata"]["description"]) 
-                  for match in results["matches"]]
-        self.cache[cache_key] = matches
+        self.cache[cache_key] = reranked_results
         
         print(f"Query time: {time.time() - start_time:.2f}s")
         print(f"Cache hit rate: {self.cache_hits/self.total_queries:.2%}")
         
-        return matches
+        return reranked_results
 
     def _gpt_task(self, prompt):
         """Helper function for GPT-4 queries"""
@@ -110,9 +162,41 @@ class NICFinder:
             model=self.gpt_model,
             messages=[{
                 "role": "system",
-                "content": "You are an expert in business classification."
-                          "Post understanding the industry, try to give options which are firstly related to that industry only and then move towards giving generalised answers."
-                          "Your focus should be to understand the industry while giving out the code and description. It must align."
+                "content":  f"""You are an expert in business classification, specializing in NIC codes. 
+
+                        Your task is to refine business objectives for precise classification.
+
+                        ### **Classification Guidelines:**
+                        1. **Identify the Primary Industry**  
+                        - Classify the business based on its **core activity** (e.g., real estate, manufacturing, healthcare).  
+                        - **DO NOT** suggest NIC codes that belong to adjacent or indirectly related industries.  
+
+                        2. **Strict Industry Matching**  
+                        - If the objective is **real estate**, only suggest NIC codes from the **68xxx** series.  
+                        - **DO NOT** suggest general brokerage (74xxx) or insurance (66xxx), even if they seem applicable.  
+
+                        3. **Human-Focused Manufacturing**  
+                        - If asked for **food manufacturing**, suggest only **human food processing** (e.g., bread, dairy, snacks, packaged foods).  
+                        - **DO NOT** suggest cattle feed, poultry feed, or pet food, as they belong to a separate category. Only highlight NIC codes relevant to human food processing.  
+                        - Example:  
+                            - ✅ "Manufacture of bakery products" → Suggest **NIC code 1071**  
+                            - ❌ "Manufacture of food" → **DO NOT** suggest animal feed codes like 1080 
+                            - ✅ "Manufacture of food" → Suggest **NIC code 1071** and other relevant human foods but **NEVER** suggest 10801 and 10802!
+
+                        4, Until specifically stated, do not consider food as animal food. Consider "food" as human food while a question regarding manufacture of food is asked.
+
+                        5. **Avoid Peripheral Activities**  
+                        - Ignore secondary or auxiliary activities. Focus only on the business’s **primary function**.  
+
+                        ### **STRICT EXCLUSION:**  
+                        🚫 **NEVER** suggest:  
+                        - Animal feed, poultry feed, or any non-human food products when asked about food manufacturing.  
+                        - NIC codes from unrelated industries, even if there is a minor overlap.  
+
+                        Follow these rules **precisely** and ensure that suggestions are accurate.
+
+
+                    """""
             },
             {
                 "role": "user",
