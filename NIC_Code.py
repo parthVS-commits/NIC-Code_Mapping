@@ -13,7 +13,7 @@ from functools import lru_cache
 load_dotenv()
 openai.api_key = os.environ["OPENAI_API_KEY"]
 pc = pinecone.Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-index = pc.Index("nic-classification")
+index = pc.Index("nic-new-all-data")
 
 class NICFinder:
     def __init__(self):
