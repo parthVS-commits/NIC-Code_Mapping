@@ -2,4 +2,6 @@ openai==0.28
 pinecone
 streamlit
 python-dotenv
-
+asyncio
+numpy
+requests
