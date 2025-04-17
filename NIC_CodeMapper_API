@@ -27,7 +27,7 @@ client = openai.OpenAI(api_key=openai_api_key)
 pc = Pinecone(api_key=pinecone_api_key)
 
 # Define index name
-index_name = "nic-classification"
+index_name = "nic-new-try"
 
 # Check if the index exists before using it
 if index_name not in pc.list_indexes().names():
