@@ -20,7 +20,7 @@ ms_openai_key = os.environ.get("MS_OPENAI_API_KEY")
 ms_openai_endpoint = os.environ.get("MS_OPENAI_ENDPOINT")
 
 pc = pinecone.Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-index = pc.Index("nic-new-all-data")
+index = pc.Index("nic-new-try")
 
 class NICFinder:
     def __init__(self):
